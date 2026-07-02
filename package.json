@@ -1,0 +1,15 @@
+{
+  "name": "crypto-trading-analyst-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that analyzes chart screenshots and returns a full SMC/ICT trading report",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "openai": "^4.68.0",
+    "telegraf": "^4.16.3"
+  }
+}
