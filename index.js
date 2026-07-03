@@ -1,31 +1,32 @@
 require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
 const { Telegraf } = require("telegraf");
 const OpenAI = require("openai");
 const systemPrompt = require("./src/systemPrompt");
 const { getCurrentSession } = require("./src/session");
 const { formatReport } = require("./src/formatReport");
-const express = require("express");
-
-const app = express();
-
-app.get("/ping", (req, res) => {
-  res.send("Hello world");
-});
+const { connectDB } = require("./src/db");
+const { seedAdmins } = require("./src/seedAdmins");
+const { isAdmin } = require("./src/adminAuth");
+const { hasActiveSubscription, startReminderJob } = require("./src/subscription");
+const { mainMenuKeyboard, sendEphemeral } = require("./src/ui");
+const User = require("./src/models/User");
+const { registerSubscriptionHandlers, sendSubscribePrompt, submitPaymentScreenshot } = require("./src/handlers/subscribe");
+const { registerAdminPanelHandlers } = require("./src/handlers/adminPanel");
+const { registerMenuHandlers, mainMenuText, HELP_TEXT, sendSamples } = require("./src/handlers/menu");
+const { handlePendingAdminInput } = require("./src/handlers/adminPanel");
 
 console.log("Starting bot...");
 
 if (!process.env.BOT_TOKEN) {
-  console.error(
-    "BOT_TOKEN is missing. Check that your .env file exists in this folder and has BOT_TOKEN set.",
-  );
+  console.error("BOT_TOKEN is missing. Check that your .env file exists in this folder and has BOT_TOKEN set.");
   process.exit(1);
 }
 if (!process.env.OPENAI_API_KEY) {
-  console.error(
-    "OPENAI_API_KEY is missing. Check that your .env file exists in this folder and has OPENAI_API_KEY set.",
-  );
+  console.error("OPENAI_API_KEY is missing. Check that your .env file exists in this folder and has OPENAI_API_KEY set.");
+  process.exit(1);
+}
+if (!process.env.MONGODB_URI) {
+  console.error("MONGODB_URI is missing. Check that your .env file exists in this folder and has MONGODB_URI set.");
   process.exit(1);
 }
 console.log("Environment variables loaded OK.");
@@ -34,8 +35,6 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const MODEL = "gpt-5.4-mini";
-const ASSETS_DIR = path.join(__dirname, "assets");
-const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
 
 // ---------- Per-chat sequential queue ----------
 // Ensures multiple images sent in a row are analyzed one at a time, in the order received,
@@ -52,56 +51,33 @@ function enqueue(chatId, taskFn) {
   return next;
 }
 
-bot.start((ctx) => {
-  ctx.reply(
-    "Send me a chart screenshot and I'll give you a full trade analysis — market structure, entry, stop loss, take profit, and a clear buy/sell/wait call.\n\nNot sure what kind of screenshot to send? Use /samples.",
-  );
+registerSubscriptionHandlers(bot);
+registerAdminPanelHandlers(bot);
+registerMenuHandlers(bot);
+
+// /start is exempt from the inline-button pattern per spec — it's the entry point
+// that hands out the buttons for everything else. Admins additionally see quick stats.
+bot.start(async (ctx) => {
+  const admin = await isAdmin(ctx);
+  const text = await mainMenuText(ctx);
+  await ctx.reply(text, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard(admin) });
 });
 
-bot.command("help", (ctx) => {
-  ctx.reply(
-    "1. Screenshot your chart (TradingView, Binance, Bybit, etc)\n2. Send it here as a photo\n3. Wait a few seconds for the full analysis\n\nUse /samples to see example screenshots.",
-  );
-});
-
-bot.command("samples", async (ctx) => {
-  if (!fs.existsSync(ASSETS_DIR)) {
-    return ctx.reply("No sample screenshots have been added yet.");
-  }
-  const files = fs
-    .readdirSync(ASSETS_DIR)
-    .filter((f) => IMAGE_EXTENSIONS.includes(path.extname(f).toLowerCase()))
-    .slice(0, 5);
-
-  if (files.length === 0) {
-    return ctx.reply("No sample screenshots have been added yet.");
-  }
-
-  await ctx.reply(
-    `Here ${files.length === 1 ? "is an example" : "are examples"} of the kind of screenshot to send:`,
-  );
-  for (const file of files) {
-    await ctx.replyWithPhoto({ source: path.join(ASSETS_DIR, file) });
-  }
-});
+bot.command("help", (ctx) => ctx.reply(HELP_TEXT));
+bot.command("samples", (ctx) => sendSamples(ctx));
 
 // ---------- Core analysis logic (shared by photo + document handlers) ----------
 async function analyzeChart(ctx, fileLink) {
-  const replyTarget = {
-    reply_parameters: { message_id: ctx.message.message_id },
-  };
+  const replyTarget = { reply_parameters: { message_id: ctx.message.message_id } };
   let statusMsg;
   try {
-    statusMsg = await ctx.reply(
-      "📥 Chart received. Processing...",
-      replyTarget,
-    );
+    statusMsg = await ctx.reply("📥 Chart received. Processing...", replyTarget);
 
     await ctx.telegram.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
       undefined,
-      "🔎 Reading chart structure...",
+      "🔎 Reading chart structure..."
     );
 
     const session = getCurrentSession();
@@ -110,7 +86,7 @@ async function analyzeChart(ctx, fileLink) {
       ctx.chat.id,
       statusMsg.message_id,
       undefined,
-      "🧠 Running full analysis (this can take a few seconds)...",
+      "🧠 Running full analysis (this can take a few seconds)..."
     );
 
     const response = await openai.chat.completions.create({
@@ -145,7 +121,7 @@ async function analyzeChart(ctx, fileLink) {
         ctx.chat.id,
         statusMsg.message_id,
         undefined,
-        "❌ Got an unreadable response from the analyst. Please try sending the chart again.",
+        "❌ Got an unreadable response from the analyst. Please try sending the chart again."
       );
       return;
     }
@@ -155,7 +131,7 @@ async function analyzeChart(ctx, fileLink) {
         ctx.chat.id,
         statusMsg.message_id,
         undefined,
-        `⚠️ ${report.rejectionReason || "That doesn't look like a chart screenshot. Please send a valid chart — use /samples to see examples."}`,
+        `⚠️ ${report.rejectionReason || "That doesn't look like a chart screenshot. Please send a valid chart — use /samples to see examples."}`
       );
       return;
     }
@@ -164,22 +140,16 @@ async function analyzeChart(ctx, fileLink) {
       ctx.chat.id,
       statusMsg.message_id,
       undefined,
-      "✅ Analysis ready",
+      "✅ Analysis ready"
     );
 
     await ctx.replyWithMarkdown(formatReport(report), replyTarget);
   } catch (err) {
     console.error("Error processing chart:", err);
-    const errorText =
-      "❌ Something went wrong while analyzing that chart. Please try again.";
+    const errorText = "❌ Something went wrong while analyzing that chart. Please try again.";
     if (statusMsg) {
       await ctx.telegram
-        .editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          errorText,
-        )
+        .editMessageText(ctx.chat.id, statusMsg.message_id, undefined, errorText)
         .catch(() => {});
     } else {
       await ctx.reply(errorText, replyTarget);
@@ -187,12 +157,34 @@ async function analyzeChart(ctx, fileLink) {
   }
 }
 
+// ---------- Access control ----------
+// Decides what an incoming image should do: admin -> free analysis, awaiting payment -> submit
+// for review, subscribed -> analysis, otherwise -> blocked with a subscribe prompt.
+async function routeIncomingImage(ctx, fileId, fileLink) {
+  if (await isAdmin(ctx)) {
+    return enqueue(ctx.chat.id, () => analyzeChart(ctx, fileLink));
+  }
+
+  const user = await User.findOne({ telegramId: ctx.from.id });
+  if (user && user.awaitingPaymentScreenshot) {
+    return submitPaymentScreenshot(ctx, fileId);
+  }
+
+  if (await hasActiveSubscription(ctx.from.id)) {
+    return enqueue(ctx.chat.id, () => analyzeChart(ctx, fileLink));
+  }
+
+  await ctx.reply("🔒 You need an active subscription to use this bot.", {
+    reply_markup: { inline_keyboard: [[{ text: "💳 Subscribe", callback_data: "menu_subscribe" }]] },
+  });
+}
+
 // ---------- Input handlers ----------
 bot.on("photo", async (ctx) => {
   const photos = ctx.message.photo;
   const fileId = photos[photos.length - 1].file_id; // highest resolution
   const fileLink = await ctx.telegram.getFileLink(fileId);
-  enqueue(ctx.chat.id, () => analyzeChart(ctx, fileLink));
+  await routeIncomingImage(ctx, fileId, fileLink);
 });
 
 bot.on("document", async (ctx) => {
@@ -200,48 +192,44 @@ bot.on("document", async (ctx) => {
   const mimeType = doc.mime_type || "";
 
   if (!mimeType.startsWith("image/")) {
-    return ctx.reply(
-      "That file isn't an image. Please send your chart as a photo or image file.",
-    );
+    return sendEphemeral(ctx, "That file isn't an image. Please send your chart as a photo or image file.");
   }
 
   const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-  enqueue(ctx.chat.id, () => analyzeChart(ctx, fileLink));
+  await routeIncomingImage(ctx, doc.file_id, fileLink);
 });
 
-bot.on("text", (ctx) => {
-  ctx.reply(
-    "Send me a chart screenshot to get your trade analysis. Use /samples if you're not sure what to send.",
-  );
+bot.on("text", async (ctx) => {
+  const consumed = await handlePendingAdminInput(ctx);
+  if (consumed) return;
+  await sendEphemeral(ctx, "Send me a chart screenshot to get your trade analysis. Use /samples if you're not sure what to send.");
 });
 
 async function startBot() {
   try {
-    const port = process.env.PORT || 3000;
-    app.listen(port, () => {
-      console.log("App is listening on port..:", port);
-    });
+    await connectDB();
+    await seedAdmins();
+
     console.log("Verifying bot token with Telegram...");
     const me = await bot.telegram.getMe();
     console.log(`Token OK. Logged in as @${me.username}`);
 
     await bot.telegram.setMyCommands([
-      { command: "start", description: "How this bot works" },
+      { command: "start", description: "Main menu" },
       { command: "help", description: "How to use the bot" },
-      {
-        command: "samples",
-        description: "See example chart screenshots to send",
-      },
+      { command: "samples", description: "See example chart screenshots to send" },
+      { command: "subscribe", description: "Subscribe to use the bot" },
+      { command: "admin", description: "Admin panel (admins only)" },
     ]);
     console.log("Menu commands set.");
+
+    startReminderJob(bot);
 
     await bot.launch();
     console.log(`Bot launched. Listening for messages as @${me.username}`);
   } catch (err) {
     console.error("Failed to start bot:", err.message || err);
-    console.error(
-      "Check: 1) BOT_TOKEN is correct, 2) you have internet access to api.telegram.org, 3) no firewall/VPN is blocking it.",
-    );
+    console.error("Check: 1) BOT_TOKEN is correct, 2) MONGODB_URI is reachable, 3) internet access to api.telegram.org.");
     process.exit(1);
   }
 }
