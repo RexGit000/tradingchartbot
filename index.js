@@ -14,7 +14,7 @@ const { registerSubscriptionHandlers, sendSubscribePrompt, submitPaymentScreensh
 const { registerAdminPanelHandlers } = require("./src/handlers/adminPanel");
 const { registerMenuHandlers, mainMenuText, HELP_TEXT, sendSamples } = require("./src/handlers/menu");
 const { handlePendingAdminInput } = require("./src/handlers/adminPanel");
-
+const express = require("express")
 console.log("Starting bot...");
 
 if (!process.env.BOT_TOKEN) {
@@ -33,7 +33,10 @@ console.log("Environment variables loaded OK.");
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+const app = express()
+app.get("/ping", (req, res)=>{
+  res.send("Hello")
+})
 const MODEL = "gpt-5.4-mini";
 
 // ---------- Per-chat sequential queue ----------
@@ -207,6 +210,10 @@ bot.on("text", async (ctx) => {
 
 async function startBot() {
   try {
+    const port = process.env.PORT || 3000
+    app.listen(port, ()=>{
+      console.log("We are listening on PORT ",port)
+    })
     await connectDB();
     await seedAdmins();
 
