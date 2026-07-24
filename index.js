@@ -14,30 +14,32 @@ const { registerSubscriptionHandlers, sendSubscribePrompt, submitPaymentScreensh
 const { registerAdminPanelHandlers } = require("./src/handlers/adminPanel");
 const { registerMenuHandlers, mainMenuText, HELP_TEXT, sendSamples } = require("./src/handlers/menu");
 const { handlePendingAdminInput } = require("./src/handlers/adminPanel");
-const express = require("express")
-console.log("Starting bot...");
+const express = require("express");
 
-if (!process.env.BOT_TOKEN) {
-  console.error("BOT_TOKEN is missing. Check that your .env file exists in this folder and has BOT_TOKEN set.");
-  process.exit(1);
-}
-if (!process.env.OPENAI_API_KEY) {
-  console.error("OPENAI_API_KEY is missing. Check that your .env file exists in this folder and has OPENAI_API_KEY set.");
-  process.exit(1);
-}
-if (!process.env.MONGODB_URI) {
-  console.error("MONGODB_URI is missing. Check that your .env file exists in this folder and has MONGODB_URI set.");
-  process.exit(1);
-}
-console.log("Environment variables loaded OK.");
+const app = express();
+app.get("/ping", (req, res) => {
+  res.send("Hello");
+});
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const app = express()
-app.get("/ping", (req, res)=>{
-  res.send("Hello")
-})
-const MODEL = "gpt-5.4-mini";
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log("We are listening on PORT ", port);
+
+  const requiredEnv = ["BOT_TOKEN", "OPENAI_API_KEY", "MONGODB_URI"];
+  const missingEnv = requiredEnv.filter((k) => !process.env[k]);
+
+  if (missingEnv.length) {
+    console.error(`Missing required env var(s): ${missingEnv.join(", ")}.`);
+    console.error("Bot initialization skipped. /ping server is still running.");
+    return;
+  }
+
+  console.log("Starting bot...");
+  console.log("Environment variables loaded OK.");
+
+  const bot = new Telegraf(process.env.BOT_TOKEN);
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const MODEL = "gpt-5.4-mini";
 
 // ---------- Per-chat sequential queue ----------
 // Ensures multiple images sent in a row are analyzed one at a time, in the order received,
@@ -210,10 +212,6 @@ bot.on("text", async (ctx) => {
 
 async function startBot() {
   try {
-    const port = process.env.PORT || 3000
-    app.listen(port, ()=>{
-      console.log("We are listening on PORT ",port)
-    })
     await connectDB();
     await seedAdmins();
 
@@ -237,7 +235,6 @@ async function startBot() {
   } catch (err) {
     console.error("Failed to start bot:", err.message || err);
     console.error("Check: 1) BOT_TOKEN is correct, 2) MONGODB_URI is reachable, 3) internet access to api.telegram.org.");
-    process.exit(1);
   }
 }
 
@@ -245,3 +242,4 @@ startBot();
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
+});
