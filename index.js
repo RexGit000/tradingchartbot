@@ -17,11 +17,37 @@ const { handlePendingAdminInput } = require("./src/handlers/adminPanel");
 const express = require("express");
 
 const app = express();
+let pingCount = 0;
+let lastPingAt = null;
+
 app.get("/ping", (req, res) => {
-  res.send("Hello");
+  pingCount += 1;
+  lastPingAt = new Date();
+  res.set("Cache-Control", "no-store");
+  res.status(200).send("Hello");
 });
 
-const port = process.env.PORT || 3000;
+app.get("/", (req, res) => res.redirect("/stats"));
+
+app.get("/stats", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const mem = process.memoryUsage();
+  res.status(200).json({
+    ok: true,
+    now: new Date().toISOString(),
+    uptimeSec: Math.floor(process.uptime()),
+    pingCount,
+    lastPingAt: lastPingAt ? lastPingAt.toISOString() : null,
+    memory: {
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      external: mem.external,
+    },
+  });
+});
+
+const port = Number(process.env.port || process.env.PORT || 3000);
 app.listen(port, () => {
   console.log("We are listening on PORT ", port);
 
